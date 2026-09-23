@@ -581,15 +581,23 @@ __declspec(noreturn) void OSPanic(char* file, int line, char* msg, ...)
 /* --- Time ---------------------------------------------------------------- */
 
 static OSTime virtual_calls; /* part of the game's state: see pc_runtime_register_state */
+static u32 virtual_frame;    /* the frame the creep belongs to */
+static int host_clock = -1;
+
+#define FRAME_TICKS ((OSTime) (__OSBusClock / 4 / 60))
+
+static int frame_locked_clock(void)
+{
+    if (host_clock < 0) {
+        host_clock = getenv("MELEE_HOST_CLOCK") != NULL;
+    }
+    return !host_clock;
+}
 
 static OSTime host_ticks(void)
 {
     LARGE_INTEGER now;
-    static int host_clock = -1;
-    if (host_clock < 0) {
-        host_clock = getenv("MELEE_HOST_CLOCK") != NULL;
-    }
-    if (!host_clock) {
+    if (frame_locked_clock()) {
         /* The game's clock is locked to the frame counter, paced or not, so
          * alarms, timeouts and the movie player advance on the same frame
          * every run regardless of host speed: what the game computes never
@@ -597,8 +605,16 @@ static OSTime host_ticks(void)
          * Each query also advances it a little so loops that spin on the
          * tick counter still terminate. MELEE_HOST_CLOCK=1 restores the
          * host's counter. */
+        /* The per-query creep must not accumulate across frames: Melee samples the
+         * pad from a periodic OSAlarm of one frame period, and a clock that runs
+         * ahead by 40 ticks per query fires that alarm twice every ~1,800 frames,
+         * which makes the game run two logic frames for one retrace. */
+        if (virtual_frame != pc_frame_count) {
+            virtual_frame = pc_frame_count;
+            virtual_calls = 0;
+        }
         virtual_calls += 40;
-        return (OSTime) pc_frame_count * (OSTime) (__OSBusClock / 4 / 60) + virtual_calls;
+        return (OSTime) pc_frame_count * FRAME_TICKS + virtual_calls;
     }
     QueryPerformanceCounter(&now);
     /* convert host counter to GameCube timer ticks (bus clock / 4) */
@@ -703,6 +719,7 @@ void pc_runtime_register_state(void)
     pc_state_register(&arena_hi, sizeof(arena_hi), "arena hi");
     pc_state_register(&alarm_head, sizeof(alarm_head), "alarm head");
     pc_state_register(&virtual_calls, sizeof(virtual_calls), "clock calls");
+    pc_state_register(&virtual_frame, sizeof(virtual_frame), "clock frame");
 }
 
 /* There is one thread and its register image is never inspected for real;
@@ -812,14 +829,36 @@ bool pc_alarm_pump(void)
 {
     bool ran = false;
     OSTime now = host_ticks();
+    if (frame_locked_clock() && alarm_head != NULL && alarm_head->period > 0) {
+        /* A periodic timer is never more than one period away. A frame with many clock queries
+         * (loading) can creep past several periods and leave the alarm scheduled periods ahead
+         * of the retrace grid, after which every frame would have to creep that far again. */
+        while (alarm_head->fire > now + alarm_head->period) {
+            alarm_head->fire -= alarm_head->period;
+        }
+    }
+    if (frame_locked_clock() && alarm_head != NULL && alarm_head->fire > now &&
+        alarm_head->fire <= (OSTime) pc_frame_count * FRAME_TICKS + FRAME_TICKS)
+    {
+        /* The game is idling until a timer fires (Melee's main loop polls the drive status,
+         * which pumps completions, until the pad-sampling alarm has queued a sample). With the
+         * frame-locked clock that wait only ends through the per-query creep, ~17,000 pumps per
+         * frame when the alarm's phase sits a period past the retrace. Jump the clock to the
+         * alarm instead, as an idle CPU sleeps until its timer interrupt; the jump never leaves
+         * the current frame period, so the alarm still fires once per retrace. */
+        virtual_calls = alarm_head->fire - (OSTime) pc_frame_count * FRAME_TICKS;
+        now = alarm_head->fire;
+    }
     while (alarm_head != NULL && alarm_head->fire <= now) {
         OSAlarm* a = alarm_head;
         OSAlarmHandler handler = a->handler;
         alarm_unlink(a);
         if (a->period > 0) {
+            /* stay on the alarm's own grid (start + k * period): rescheduling from `now` would let
+             * the clock's per-query creep advance the phase */
             a->fire += a->period;
             if (a->fire <= now) {
-                a->fire = now + a->period; /* don't try to catch up */
+                a->fire += ((now - a->fire) / a->period + 1) * a->period; /* skip missed periods */
             }
             alarm_insert(a);
         }

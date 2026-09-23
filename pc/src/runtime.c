@@ -581,6 +581,7 @@ __declspec(noreturn) void OSPanic(char* file, int line, char* msg, ...)
 /* --- Time ---------------------------------------------------------------- */
 
 static OSTime virtual_calls; /* part of the game's state: see pc_runtime_register_state */
+static u32 virtual_frame;    /* frame the creep belongs to; saved with it */
 
 static OSTime host_ticks(void)
 {
@@ -597,6 +598,15 @@ static OSTime host_ticks(void)
          * Each query also advances it a little so loops that spin on the
          * tick counter still terminate. MELEE_HOST_CLOCK=1 restores the
          * host's counter. */
+        /* The per-query creep must not carry over between frames: the game samples
+         * the pad from a periodic OSAlarm of one frame period (lb_80019628), and a
+         * clock that runs ahead by 40 ticks per query crosses an extra period every
+         * ~1,800 frames, so the alarm fires twice, two pad samples are queued and
+         * the main loop runs two logic frames for one retrace. */
+        if (virtual_frame != pc_frame_count) {
+            virtual_frame = pc_frame_count;
+            virtual_calls = 0;
+        }
         virtual_calls += 40;
         return (OSTime) pc_frame_count * (OSTime) (__OSBusClock / 4 / 60) + virtual_calls;
     }
@@ -703,6 +713,7 @@ void pc_runtime_register_state(void)
     pc_state_register(&arena_hi, sizeof(arena_hi), "arena hi");
     pc_state_register(&alarm_head, sizeof(alarm_head), "alarm head");
     pc_state_register(&virtual_calls, sizeof(virtual_calls), "clock calls");
+    pc_state_register(&virtual_frame, sizeof(virtual_frame), "clock frame");
 }
 
 /* There is one thread and its register image is never inspected for real;

@@ -42,8 +42,6 @@
 #define __frsqrte(x) (1.0 / sqrt((double) (x)))
 #define __fabs(x) fabs((double) (x))
 #define __fabsf(x) fabsf(x)
-#define sqrtf__Ff(x) sqrtf(x)
-#define sqrtf_accurate(x) sqrtf(x)
 
 /* MSVC's math.h only exposes M_PI and friends with this defined. */
 #ifndef _USE_MATH_DEFINES
@@ -74,6 +72,36 @@ float melee_acosf(float x);
 float melee_asinf(float x);
 float melee_expf(float x);
 float melee_powf(float x, float y);
+
+/* The game's sqrtf (src/MSL/math_ppc.h) is an inline frsqrte + Newton
+ * sequence guarded by x > 0: it returns x itself for zero and negative
+ * inputs, where the CRT returns NaN. Game code relies on that. The bone
+ * dynamics solver (lb_8001044C) takes sqrtf of a negative whenever a link
+ * ends within 0.1 of a collider sphere, and with NaN it silently skipped the
+ * push away from the body (Fox's tail sinking into a lying fighter, so a hit
+ * that connects on the console misses). sqrtf__Ff is the out-of-line MSL
+ * function and keeps the CRT's semantics. */
+static __inline float pc_msl_sqrtf(float x)
+{
+    return x > 0.0f ? (sqrtf)(x) : x;
+}
+#define sqrtf__Ff(x) (sqrtf)(x)
+#define sqrtf_accurate(x) pc_msl_sqrtf(x)
+#define sqrtf(x) pc_msl_sqrtf(x)
+
+/* sinf, cosf and tanf are MSL's (src/MSL/trigf.c, not compiled here) and
+ * atanf is lbtrigf.c's (Metrowerks-only there); pc/src/msl_trig.c has them
+ * with the console's fused rounding. Without this they reached the CRT, whose
+ * results differ from the console's in the last bits on a large share of
+ * inputs; atan2f, acosf and asinf above all call atanf. */
+#define sinf melee_sinf
+#define cosf melee_cosf
+#define tanf melee_tanf
+#define atanf melee_atanf
+float melee_sinf(float x);
+float melee_cosf(float x);
+float melee_tanf(float x);
+float melee_atanf(float x);
 
 /* Metrowerks setjmp: the game embeds __jmp_buf (a 248-byte PowerPC register
  * image) inside its own structures and calls __setjmp/longjmp on it. On PC we

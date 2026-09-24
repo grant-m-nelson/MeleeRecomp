@@ -26,19 +26,32 @@
 #define MSL_INLINE static __forceinline
 
 /* Exact single-precision fused multiply-add: a*b + c with one rounding.
- * The product of two floats is exact in double. The sum is formed in double
- * with its rounding error recovered exactly (TwoSum), then rounded to odd:
- * a double with a nonzero error keeps an odd last bit. Rounding that
- * round-to-odd double to float is then correctly rounded, since double has
- * more than two bits beyond float's precision. */
+ * The product of two floats is exact in double, so only the double sum is
+ * rounded before the conversion to float. That double rounding can only go
+ * wrong when the sum lands exactly on a float rounding midpoint (every
+ * midpoint is a double, so the rounded sum cannot cross one). Otherwise, and
+ * for results in float's normal range, converting the double sum is correct.
+ * In the rare remaining cases the sum's rounding error is recovered exactly
+ * (TwoSum) and the sum rounded to odd: a double with a nonzero error keeps an
+ * odd last bit, and rounding that to float is correctly rounded, since double
+ * has more than two bits beyond float's precision. */
 MSL_INLINE float msl_fmaf(float a, float b, float c)
 {
     double p = (double) a * (double) b;
     double s = p + (double) c;
-    double v = s - p;
-    double err = (p - (s - v)) + ((double) c - v);
+    double v, err;
     uint64_t bits;
 
+    memcpy(&bits, &s, sizeof(bits));
+    /* exponent at least float's smallest normal (2^-126, biased 897), and the
+     * 29 bits below float precision not exactly one half */
+    if (((uint32_t) (bits >> 52) & 0x7FF) >= 897 &&
+        ((uint32_t) bits & 0x1FFFFFFFu) != 0x10000000u)
+    {
+        return (float) s;
+    }
+    v = s - p;
+    err = (p - (s - v)) + ((double) c - v);
     if (err != 0.0 && s - s == 0.0) { /* s - s == 0: s is finite */
         memcpy(&bits, &s, sizeof(bits));
         if ((bits & 1) == 0) {
